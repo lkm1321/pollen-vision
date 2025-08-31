@@ -8,6 +8,7 @@ import cv2
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
+
 from pollen_vision.camera_wrappers.depthai.utils import get_socket_from_name
 
 
@@ -170,7 +171,9 @@ class CamConfig:
 
         return ret_string
 
-    def compute_projection_matrices(self) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    def compute_projection_matrices(
+        self,
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         left_socket = get_socket_from_name("left", self.name_to_socket)
         right_socket = get_socket_from_name("right", self.name_to_socket)
 
@@ -183,20 +186,20 @@ class CamConfig:
         T *= 0.01  # to meter for ROS
 
         R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
-            self.get_K_left(),
+            self.get_K("left"),
             left_D,
-            self.get_K_right(),
+            self.get_K("right"),
             right_D,
             self.undistort_resolution,
             R,
             T,
             flags=0,
         )
-        return P1.astype(np.float32), P2.astype(np.float32)
+        return P1.astype(np.float64), P2.astype(np.float64)
 
     def to_ROS_msg(
         self, side: str = "left"
-    ) -> Tuple[int, int, str, List[float], npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    ) -> Tuple[int, int, str, List[float], npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float64],]:
         # as defined in https://docs.ros.org/en/melodic/api/sensor_msgs/html/msg/CameraInfo.html
 
         height = self.resize_resolution[1]
@@ -210,13 +213,13 @@ class CamConfig:
             self.P_left, self.P_right = self.compute_projection_matrices()
 
         if side == "left":
-            K = self.get_K_left().flatten()
+            K = self.get_K("left").flatten()
             R = np.array(self.calib.getStereoLeftRectificationRotation()).flatten()
-            P = np.array(self.P_left).flatten()
+            P = np.array(self.P_left, dtype=np.float64).flatten()
 
         else:
-            K = self.get_K_right().flatten()
+            K = self.get_K("right").flatten()
             R = np.array(self.calib.getStereoRightRectificationRotation()).flatten()
-            P = np.array(self.P_right).flatten()
+            P = np.array(self.P_right, dtype=np.float64).flatten()
 
         return height, width, distortion_model, D, K, R, P
