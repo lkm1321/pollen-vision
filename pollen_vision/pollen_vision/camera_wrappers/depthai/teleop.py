@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
+
 from pollen_vision.camera_wrappers.depthai.wrapper import DepthaiWrapper
 
 
@@ -69,7 +70,9 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
 
         return self._data_h264, self._latency_h264, self._ts_h264
 
-    def get_data_mjpeg(self) -> Tuple[Dict[str, npt.NDArray[np.uint8]], Dict[str, float], Dict[str, timedelta]]:
+    def get_data_mjpeg(
+        self,
+    ) -> Tuple[Dict[str, npt.NDArray[np.uint8]], Dict[str, float], Dict[str, timedelta]]:
         for name, queue in self._queues_mjpeg.items():
             pkt = queue.get()
             self._data_mjpeg[name] = pkt.getData()  # type: ignore[attr-defined]
@@ -109,8 +112,8 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
     def _create_encoders(self, pipeline: dai.Pipeline) -> dai.Pipeline:
         """Creates the h264 encoders for the left and right images."""
 
-        profile = dai.VideoEncoderProperties.Profile.H264_BASELINE
-        bitrate = 4000
+        profile = dai.VideoEncoderProperties.Profile.H265_MAIN
+        bitrate = 3000
         numBFrames = 0  # no B frames for streaming
         self.left_encoder = pipeline.create(dai.node.VideoEncoder)
         self.left_encoder.setDefaultProfilePreset(self.cam_config.fps, profile)
