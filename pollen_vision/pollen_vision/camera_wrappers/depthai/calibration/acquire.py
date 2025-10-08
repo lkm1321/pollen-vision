@@ -2,6 +2,7 @@ import argparse
 import os
 
 import cv2
+from cv2 import aruco
 import numpy as np
 from pollen_vision.camera_wrappers.depthai import SDKWrapper
 from pollen_vision.camera_wrappers.depthai.utils import (
@@ -10,7 +11,9 @@ from pollen_vision.camera_wrappers.depthai.utils import (
 )
 
 valid_configs = get_config_files_names()
-argParser = argparse.ArgumentParser(description="Acquire images from a luxonis camera and save them to disk.")
+argParser = argparse.ArgumentParser(
+    description="Acquire images from a luxonis camera and save them to disk."
+)
 argParser.add_argument(
     "--config",
     type=str,
@@ -33,6 +36,8 @@ right_path = os.path.join(args.imagesPath, "right")
 os.makedirs(left_path, exist_ok=True)
 os.makedirs(right_path, exist_ok=True)
 
+ARUCO_DICT = aruco.getPredefinedDictionary(aruco.DICT_4X4_1000)
+
 print("Press return to save an image pair.")
 print("(Keep the focus on the opencv window for the inputs to register.)")
 print("Press esc or q to exit.")
@@ -44,7 +49,19 @@ while True:
     for name in data.keys():
         _data[name] = data[name]
 
-    concat = np.hstack((_data["left"], _data["right"]))
+    display_l, display_r = _data["left"].copy(), _data["right"].copy()
+
+    lcorners, lids, _ = aruco.detectMarkers(image=display_l, dictionary=ARUCO_DICT)
+    rcorners, rids, _ = aruco.detectMarkers(image=display_r, dictionary=ARUCO_DICT)
+
+    # draw detected markers
+    if len(lcorners) > 0:
+        # thick lines for better visibility
+        aruco.drawDetectedMarkers(display_l, lcorners, lids, borderColor=(0, 0, 255))
+    if len(rcorners) > 0:
+        aruco.drawDetectedMarkers(display_r, rcorners, rids, borderColor=(0, 0, 255))
+
+    concat = np.hstack((display_l, display_r))
     cv2.imshow(name, cv2.resize(concat, (0, 0), fx=0.5, fy=0.5))
     key = cv2.waitKey(1)
     if key == 13:
