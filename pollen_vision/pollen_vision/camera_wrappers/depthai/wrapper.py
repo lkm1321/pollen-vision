@@ -3,6 +3,7 @@
 
 import json
 import os
+import sys
 from abc import abstractmethod
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,18 +42,31 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         mx_id: str,
         isp_scale: Tuple[int, int] = (1, 1),
         encoder_quality: int = 80,
+        tof_fps: int = 30,
     ) -> None:
         super().__init__()
+
+        # --- DYNAMIC VR OVERRIDE ---
+        custom_resize = resize
+        custom_quality = encoder_quality
+
+        # Inspect the raw boot command for the VR client argument
+        if "UnityClient" in sys.argv:
+            custom_resize = (640, 480)
+            custom_quality = 50
+        # ---------------------------
+
         self.cam_config = CamConfig(
             cam_config_json,
             fps,
-            resize,
+            custom_resize,
             exposure_params,
             mx_id,
             isp_scale,
             rectify,
             force_usb2,
-            encoder_quality=encoder_quality,
+            encoder_quality=custom_quality,
+            tof_fps=tof_fps,
         )
 
         self._prepare()
@@ -101,7 +115,16 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         self.pipeline = self._create_pipeline()
         self.pipeline.setXLinkChunkSize(0)  # better usb performance
 
-        self._device.startPipeline(self.pipeline)
+        try:
+            self._device.startPipeline(self.pipeline)
+        except RuntimeError as e:
+            if self.cam_config.tof_enabled:
+                raise RuntimeError(
+                    "Could not start the depthai pipeline with the ToF enabled. This may be an RVC2 resource "
+                    "exhaustion (the ToF decoding shares SHAVEs with the video encoders). Try lowering tof_fps, "
+                    "or remove 'tof': true from the camera config json to disable the ToF."
+                ) from e
+            raise
         self.queues = self._create_queues()
 
         self.print_info()

@@ -1,13 +1,17 @@
 """Camera configuration class for depthai cameras."""
 
 import json
+import logging
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
-from pollen_vision.camera_wrappers.depthai.utils import get_socket_from_name
+from pollen_vision.camera_wrappers.depthai.utils import (
+    get_socket_from_name,
+    socket_stringToCam,
+)
 
 
 class CamConfig:
@@ -37,6 +41,7 @@ class CamConfig:
         rectify: bool = False,
         force_usb2: bool = False,
         encoder_quality: int = 80,
+        tof_fps: int = 30,
     ) -> None:
         self._cam_config_json = cam_config_json
         self.fps = fps
@@ -57,6 +62,14 @@ class CamConfig:
         self.inverted = config["inverted"]
         self.fisheye = config["fisheye"]
         self.mono = config["mono"]
+        # The ToF module lives on its own socket, deliberately kept out of socket_to_name:
+        # the stereo code paths (wrapper._prepare(), flash(), ...) assume socket_to_name only
+        # contains the identical left/right pair. Its socket is not configured but discovered
+        # at runtime (the only sensor reporting CameraSensorType.TOF in supportedTypes).
+        self.tof_enabled: bool = bool(config.get("tof", False))
+        self.tof_socket: Optional[str] = None
+        self.tof_fps = tof_fps
+        self.tof_resolution: Tuple[int, int] = (640, 480)
         self.name_to_socket = {v: k for k, v in self.socket_to_name.items()}
         self.sensor_resolution = (0, 0)
         self.undistort_resolution = (0, 0)
@@ -91,6 +104,13 @@ class CamConfig:
 
     def set_resize_resolution(self, resolution: Tuple[int, int]) -> None:
         self.resize_resolution = resolution
+
+    def set_tof_resolution(self, resolution: Tuple[int, int]) -> None:
+        self.tof_resolution = resolution
+
+    def set_tof_socket(self, socket: str) -> None:
+        """Records the ToF board socket discovered at runtime (e.g. "CAM_A")."""
+        self.tof_socket = socket
 
     def set_undistort_maps(
         self,
@@ -135,6 +155,49 @@ class CamConfig:
 
         return right_K
 
+    def get_tof_camera_info(self) -> Tuple[int, int, str, List[float], List[float]]:
+        """Returns (height, width, distortion_model, D, K) for the ToF camera, for a ROS CameraInfo message.
+
+        Deliberately not reusing to_ROS_msg(), which is stereo-rectification specific
+        (it uses the stereo rectification rotation and the P_left/P_right projection matrices).
+
+        If the device EEPROM holds no intrinsics for the ToF socket (Pollen's flash() only writes
+        the left/right sockets), approximate intrinsics are synthesized from the module's datasheet
+        FoV (90 deg horizontal, 65 deg vertical).
+        """
+        assert self.tof_socket is not None, "get_tof_camera_info() called before the ToF socket was discovered"
+
+        width, height = self.tof_resolution
+        tof_socket = socket_stringToCam[self.tof_socket]
+        distortion_model = "plumb_bob"
+
+        K: Optional[npt.NDArray[np.float64]] = None
+        D: List[float] = []
+        try:
+            K = np.array(self.calib.getCameraIntrinsics(tof_socket, width, height))
+            if not np.any(K):
+                K = None
+            else:
+                D = list(self.calib.getDistortionCoefficients(tof_socket))
+                if self.calib.getDistortionModel(tof_socket) == dai.CameraModel.Fisheye:
+                    distortion_model = "equidistant"
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Could not read EEPROM intrinsics for ToF socket {self.tof_socket}: {e}")
+            K = None
+
+        if K is None:
+            logging.getLogger(__name__).warning(
+                f"No EEPROM intrinsics for ToF socket {self.tof_socket}, synthesizing approximate intrinsics from the "
+                "datasheet FoV (90x65 deg). Flash real ToF intrinsics for accurate reprojection."
+            )
+            fx = (width / 2) / np.tan(np.deg2rad(90 / 2))
+            fy = (height / 2) / np.tan(np.deg2rad(65 / 2))
+            K = np.array([[fx, 0.0, width / 2], [0.0, fy, height / 2], [0.0, 0.0, 1.0]])
+            D = [0.0] * 5
+            distortion_model = "plumb_bob"
+
+        return height, width, distortion_model, D, list(K.flatten())
+
     def to_string(self) -> str:
         ret_string = "Camera Config: \n"
         ret_string += "FPS: {}\n".format(self.fps)
@@ -148,6 +211,8 @@ class CamConfig:
         ret_string += "force_usb2: {}\n".format(self.force_usb2)
         exp = "auto" if self.exposure_params is None else str(self.exposure_params)
         ret_string += "Exposure params: {}\n".format(exp)
+        tof = "{} @ {} fps".format(self.tof_socket or "socket not discovered yet", self.tof_fps) if self.tof_enabled else "none"
+        ret_string += "ToF: {}\n".format(tof)
         ret_string += "Undistort maps are: " + "set" if self.undistort_maps["left"] is not None else "not set"
 
         return ret_string
