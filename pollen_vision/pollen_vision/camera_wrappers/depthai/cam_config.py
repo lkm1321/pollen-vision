@@ -67,6 +67,9 @@ class CamConfig:
         # contains the identical left/right pair. Its socket is not configured but discovered
         # at runtime (the only sensor reporting CameraSensorType.TOF in supportedTypes).
         self.tof_enabled: bool = bool(config.get("tof", False))
+        # EEPROM-based ToF corrections (FPPN, wiggle, optical). Disable ("tof_corrections": false)
+        # to get uncorrected depth out of a module whose calibration EEPROM cannot be read.
+        self.tof_corrections: bool = bool(config.get("tof_corrections", True))
         self.tof_socket: Optional[str] = None
         self.tof_fps = tof_fps
         self.tof_resolution: Tuple[int, int] = (640, 480)

@@ -216,9 +216,14 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
 
         self.tof = pipeline.create(dai.node.ToF)
         tof_config = self.tof.initialConfig.get()
-        tof_config.enableFPPNCorrection = True
-        tof_config.enableOpticalCorrection = True
-        tof_config.enableWiggleCorrection = True
+        corrections = bool(self.cam_config.tof_corrections)
+        if not corrections:
+            self._logger.warning(
+                "ToF EEPROM-based corrections (FPPN/wiggle/optical) disabled by config: depth accuracy will be degraded"
+            )
+        tof_config.enableFPPNCorrection = corrections
+        tof_config.enableOpticalCorrection = corrections
+        tof_config.enableWiggleCorrection = corrections
         tof_config.enablePhaseShuffleTemporalFilter = True
         tof_config.enablePhaseUnwrapping = True
         tof_config.phaseUnwrappingLevel = 4
