@@ -62,7 +62,9 @@ def get_connected_devices() -> Dict[str, str]:
                 is_teleop_head = True
 
         type = "teleop_head" if is_teleop_head else "other"
-        devices[deviceInfo.getMxId()] = type
+        # depthai v3 renamed DeviceInfo.getMxId() -> getDeviceId(); the id round-trips through
+        # CamConfig.get_device_info()'s dai.DeviceInfo(mx_id) to reconnect to the same device.
+        devices[deviceInfo.getDeviceId()] = type
         device.close()
 
     return devices

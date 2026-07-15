@@ -326,7 +326,8 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
 
         self._logger.info("Flashing ...")
         try:
-            self._device.flashCalibration2(ch)
+            # depthai v3 dropped flashCalibration2(); flashCalibration() is the current API.
+            self._device.flashCalibration(ch)
             self._logger.info("Calibration flashed successfully")
         except Exception as e:
             self._logger.error("Flashing failed")
