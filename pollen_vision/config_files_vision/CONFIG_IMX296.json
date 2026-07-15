@@ -20,7 +20,7 @@
     "median": "KERNEL_3x3"
   },
   "tof_filtering": {
-    "enabled": true,
+    "enabled": false,
     "run_on_host": true,
     "confidence": {"enable": false, "threshold": 0},
     "temporal": {"enable": true, "alpha": 0.4, "delta": 3, "persistency_mode": "VALID_2_IN_LAST_4"},

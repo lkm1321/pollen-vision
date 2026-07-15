@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import time
 from abc import abstractmethod
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -93,10 +94,7 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         """
         self._logger.debug("Connecting to camera")
 
-        self._device = dai.Device(
-            self.cam_config.get_device_info(),
-            maxUsbSpeed=(dai.UsbSpeed.HIGH if self.cam_config.force_usb2 else dai.UsbSpeed.SUPER_PLUS),
-        )
+        self._device = self._connect_device()
 
         connected_cameras_features = []
         for cam in self._device.getConnectedCameraFeatures():
@@ -144,6 +142,24 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
             raise
 
         self.print_info()
+
+    def _connect_device(self) -> Any:
+        """Connects to the depthai device, retrying transient "device not found" USB errors.
+
+        USB enumeration is racy: get_connected_devices() just opened and closed every device to find the
+        head, and a process that crashed can leave the device rebooting for a second or two. Retry a few
+        times instead of failing the whole service on a transient error.
+        """
+        max_speed = dai.UsbSpeed.HIGH if self.cam_config.force_usb2 else dai.UsbSpeed.SUPER_PLUS
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 4):
+            try:
+                return dai.Device(self.cam_config.get_device_info(), maxUsbSpeed=max_speed)
+            except Exception as e:
+                last_exc = e
+                self._logger.warning(f"depthai device connection attempt {attempt}/3 failed: {e}")
+                time.sleep(2)
+        raise RuntimeError("Could not connect to the depthai device after 3 attempts") from last_exc
 
     def print_info(self) -> None:
         """Prints the camera configuration."""
