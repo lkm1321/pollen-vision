@@ -123,6 +123,9 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         # depthai v3: the pipeline is constructed around the already-opened device, and the subclass
         # populates it with nodes in _create_pipeline().
         self.pipeline = dai.Pipeline(self._device)
+        # Restored from the v2 pipeline (still valid in v3): chunk size 0 sends each XLink packet in a
+        # single transfer, needed for the throughput of the encoded + raw ToF streams over USB.
+        self.pipeline.setXLinkChunkSize(0)
         self._create_pipeline()
 
         # Output queues are created from node outputs and must exist before the pipeline is started.
