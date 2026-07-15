@@ -33,6 +33,14 @@ median_stringToParam = {
     "KERNEL_7x7": dai.filters.params.MedianFilter.KERNEL_7x7,
 }
 
+# depthai v3 ToF filtering preset (ImageFiltersPresetMode), keyed by the config json string. Used as
+# the starting point for the ToF node's built-in confidence + image filters via ToF.build(socket, preset).
+imagefilters_preset_stringToMode = {
+    "TOF_MID_RANGE": dai.ImageFiltersPresetMode.TOF_MID_RANGE,
+    "TOF_HIGH_RANGE": dai.ImageFiltersPresetMode.TOF_HIGH_RANGE,
+    "TOF_LOW_RANGE": dai.ImageFiltersPresetMode.TOF_LOW_RANGE,
+}
+
 # depthai v3 ImageFilters temporal-filter persistency mode, keyed by the config json string.
 persistency_stringToMode = {
     m: getattr(dai.node.ImageFilters.TemporalFilterParams.PersistencyMode, m)

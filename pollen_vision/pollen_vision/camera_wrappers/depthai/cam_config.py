@@ -29,18 +29,14 @@ TOF_CONFIG_DEFAULTS: Dict[str, Any] = {
     "median": "KERNEL_3x3",
 }
 
-# Post-decode depth filtering (depthai v3 ToFDepthConfidenceFilter + ImageFilters nodes). Overridable
-# from the "tof_filtering" block of the camera config json. On RVC2 these run on the host CPU
-# (run_on_host), so enabling them costs host cycles rather than device SHAVEs. The image filters are
-# applied in the order confidence -> temporal -> speckle -> spatial -> median (Luxonis tuning guide).
+# Post-decode depth filtering, driven by the "tof_filtering" block of the camera config json. The v3
+# ToF node has a built-in confidence + image-filter chain initialised from a preset ("preset": one of
+# TOF_MID_RANGE / TOF_HIGH_RANGE / TOF_LOW_RANGE). On RVC2 those filters run on the host CPU, so
+# "enabled": false publishes the decode-only output (tof.rawDepth, no host cost) while "enabled": true
+# publishes the preset-filtered output (tof.depth).
 TOF_FILTERING_DEFAULTS: Dict[str, Any] = {
     "enabled": False,
-    "run_on_host": True,
-    "confidence": {"enable": False, "threshold": 0},
-    "temporal": {"enable": False, "alpha": 0.4, "delta": 3, "persistency_mode": "VALID_2_IN_LAST_4"},
-    "speckle": {"enable": False, "difference_threshold": 2, "speckle_range": 50},
-    "spatial": {"enable": False, "alpha": 0.5, "delta": 3, "hole_filling_radius": 2, "num_iterations": 1},
-    "median": "MEDIAN_OFF",
+    "preset": "TOF_MID_RANGE",
 }
 
 

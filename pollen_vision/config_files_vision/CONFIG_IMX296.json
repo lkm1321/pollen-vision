@@ -21,11 +21,6 @@
   },
   "tof_filtering": {
     "enabled": false,
-    "run_on_host": true,
-    "confidence": {"enable": false, "threshold": 0},
-    "temporal": {"enable": true, "alpha": 0.4, "delta": 3, "persistency_mode": "VALID_2_IN_LAST_4"},
-    "speckle": {"enable": true, "difference_threshold": 2, "speckle_range": 50},
-    "spatial": {"enable": true, "alpha": 0.5, "delta": 3, "hole_filling_radius": 2, "num_iterations": 1},
-    "median": "KERNEL_5x5"
+    "preset": "TOF_MID_RANGE"
   }
 }

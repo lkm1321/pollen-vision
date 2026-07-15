@@ -1,10 +1,14 @@
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
-from pollen_vision.camera_wrappers.depthai.utils import median_stringToParam, persistency_stringToMode, socket_camToString
+from pollen_vision.camera_wrappers.depthai.utils import (
+    imagefilters_preset_stringToMode,
+    median_stringToParam,
+    socket_camToString,
+)
 from pollen_vision.camera_wrappers.depthai.wrapper import DepthaiWrapper
 
 
@@ -166,13 +170,17 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
         return self._link_pipeline(pipeline)
 
     def _create_tof_nodes(self, pipeline: dai.Pipeline) -> dai.Pipeline:
-        """Creates the ToF camera node, the on-device ToF depth decoding node, and (optionally) the
-        host-run depth filter chain.
+        """Creates the on-device ToF node and selects which depth output to publish.
 
         The ToF board socket is not configured but discovered here: it is the only connected sensor
         reporting CameraSensorType.TOF in supportedTypes. (Matching on supportedTypes, not on
         CameraFeatures.name, which is an EEPROM alias and can be empty.)
-        Every ToF setting is driven by the "tof_config" and "tof_filtering" blocks of the camera config json.
+
+        The v3 ToF node bundles the depth decoding with a confidence filter and an image-filter chain,
+        initialised from an ImageFiltersPresetMode ("tof_filtering.preset") as the starting point.
+        "tof_config" (corrections, phase unwrapping, median) applies on-device to the decode. On RVC2 the
+        image/confidence filters run on the host CPU, so tof.rawDepth is the decode-only output (no host
+        cost) and tof.depth adds the preset filters: "tof_filtering.enabled" selects between them.
         """
         tof_socket: Optional[dai.CameraBoardSocket] = None
         for cam in self._device.getConnectedCameraFeatures():
@@ -190,7 +198,11 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
             )
 
         tc = self.cam_config.tof_config
-        self.tof = pipeline.create(dai.node.ToF).build(tof_socket, fps=int(tc["fps"]))
+        filt = self.cam_config.tof_filtering
+        preset = imagefilters_preset_stringToMode.get(
+            filt.get("preset", "TOF_MID_RANGE"), dai.ImageFiltersPresetMode.TOF_MID_RANGE
+        )
+        self.tof = pipeline.create(dai.node.ToF).build(tof_socket, preset, int(tc["fps"]))
 
         cfg = self.tof.getInitialConfig()
         cfg.enableFPPNCorrection = bool(tc["enable_fppn_correction"])
@@ -206,75 +218,9 @@ class TeleopWrapper(DepthaiWrapper):  # type: ignore[misc]
         cfg.setMedianFilter(median_stringToParam[tc["median"]])
         self.tof.setInitialConfig(cfg)
 
-        self._tof_depth_out = self._create_tof_filters(pipeline)
+        self._tof_depth_out = self.tof.depth if bool(filt.get("enabled")) else self.tof.rawDepth
 
         return pipeline
-
-    def _create_tof_filters(self, pipeline: dai.Pipeline) -> dai.Node.Output:
-        """Builds the optional, configurable ToF depth filter chain and returns the output to publish.
-
-        When "tof_filtering".enabled is false, the raw ToF depth output is returned unchanged. Otherwise
-        the enabled stages are applied in order: confidence cleanup (ToFDepthConfidenceFilter), then the
-        temporal -> speckle -> spatial -> median ImageFilters chain (Luxonis tuning-guide order). On RVC2
-        these nodes run on the host CPU (tof_filtering.run_on_host).
-        """
-        filt = self.cam_config.tof_filtering
-        depth_out: dai.Node.Output = self.tof.depth
-        if not filt.get("enabled"):
-            return depth_out
-
-        run_on_host = bool(filt.get("run_on_host", True))
-
-        confidence = filt.get("confidence", {})
-        if confidence.get("enable"):
-            conf = pipeline.create(dai.node.ToFDepthConfidenceFilter).build(self.tof.depth, self.tof.amplitude)
-            conf.setRunOnHost(run_on_host)
-            conf.initialConfig.confidenceThreshold = int(confidence.get("threshold", 0))
-            depth_out = conf.filteredDepth
-
-        image_filters: List[Any] = []
-
-        temporal = filt.get("temporal", {})
-        if temporal.get("enable"):
-            params = dai.node.ImageFilters.TemporalFilterParams()
-            params.enable = True
-            params.alpha = float(temporal.get("alpha", 0.4))
-            params.delta = int(temporal.get("delta", 3))
-            params.persistencyMode = persistency_stringToMode[temporal.get("persistency_mode", "VALID_2_IN_LAST_4")]
-            image_filters.append(params)
-
-        speckle = filt.get("speckle", {})
-        if speckle.get("enable"):
-            params = dai.node.ImageFilters.SpeckleFilterParams()
-            params.enable = True
-            params.differenceThreshold = int(speckle.get("difference_threshold", 2))
-            params.speckleRange = int(speckle.get("speckle_range", 50))
-            image_filters.append(params)
-
-        spatial = filt.get("spatial", {})
-        if spatial.get("enable"):
-            params = dai.node.ImageFilters.SpatialFilterParams()
-            params.enable = True
-            params.alpha = float(spatial.get("alpha", 0.5))
-            params.delta = int(spatial.get("delta", 3))
-            params.holeFillingRadius = int(spatial.get("hole_filling_radius", 2))
-            params.numIterations = int(spatial.get("num_iterations", 1))
-            image_filters.append(params)
-
-        median_name = filt.get("median", "MEDIAN_OFF")
-        median_param = median_stringToParam[median_name] if median_name != "MEDIAN_OFF" else None
-
-        if image_filters or median_param is not None:
-            image_filters_node = pipeline.create(dai.node.ImageFilters).build(depth_out)
-            image_filters_node.setRunOnHost(run_on_host)
-            config = image_filters_node.initialConfig
-            for params in image_filters:
-                config.insertFilter(params)
-            if median_param is not None:
-                config.insertFilter(median_param)
-            depth_out = image_filters_node.output
-
-        return depth_out
 
     def _create_queues(self) -> Dict[str, dai.MessageQueue]:
         """Creates the h264 (streaming), mjpeg (ROS) and ToF depth output queues from the node outputs."""
