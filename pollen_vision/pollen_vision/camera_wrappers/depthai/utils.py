@@ -24,6 +24,31 @@ socket_camToString = {
     dai.CameraBoardSocket.CAM_D: "CAM_D",
 }
 
+# depthai v3 median-kernel parameter (shared by ToFConfig.setMedianFilter and the ImageFilters
+# median stage). Keyed by the string used in the camera config json.
+median_stringToParam = {
+    "MEDIAN_OFF": dai.filters.params.MedianFilter.MEDIAN_OFF,
+    "KERNEL_3x3": dai.filters.params.MedianFilter.KERNEL_3x3,
+    "KERNEL_5x5": dai.filters.params.MedianFilter.KERNEL_5x5,
+    "KERNEL_7x7": dai.filters.params.MedianFilter.KERNEL_7x7,
+}
+
+# depthai v3 ImageFilters temporal-filter persistency mode, keyed by the config json string.
+persistency_stringToMode = {
+    m: getattr(dai.node.ImageFilters.TemporalFilterParams.PersistencyMode, m)
+    for m in [
+        "PERSISTENCY_OFF",
+        "VALID_8_OUT_OF_8",
+        "VALID_2_IN_LAST_3",
+        "VALID_2_IN_LAST_4",
+        "VALID_2_OUT_OF_8",
+        "VALID_1_IN_LAST_2",
+        "VALID_1_IN_LAST_5",
+        "VALID_1_IN_LAST_8",
+        "PERSISTENCY_INDEFINITELY",
+    ]
+}
+
 
 def get_connected_devices() -> Dict[str, str]:
     """Returns a dictionary of connected devices and their types. Key is mx_id and value is type (IMX296 or other for now)."""

@@ -7,29 +7,37 @@ import sys
 from abc import abstractmethod
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
 from pollen_vision.camera_wrappers import CameraWrapper
-from pollen_vision.camera_wrappers.depthai.calibration.undistort import (
-    compute_undistort_maps,
-    get_mesh,
-)
+from pollen_vision.camera_wrappers.depthai.calibration.undistort import compute_undistort_maps, get_mesh
 from pollen_vision.camera_wrappers.depthai.cam_config import CamConfig
-from pollen_vision.camera_wrappers.depthai.utils import (
-    get_inv_R_T,
-    get_socket_from_name,
-    socket_camToString,
-)
+from pollen_vision.camera_wrappers.depthai.utils import get_inv_R_T, get_socket_from_name, socket_camToString
 
 
 class DepthaiWrapper(CameraWrapper):  # type: ignore
     """Wrapper is an abstract class for luxonis cameras using the depthai library.
 
     It factors out the common code between the different camera wrappers.
+
+    Migrated to the depthai v3 API: the pipeline owns the device, cameras are created with
+    Camera.build()/requestOutput(), rectification uses the dedicated Warp node, and output queues
+    are created directly from node outputs (there is no XLinkOut / stream-name indirection).
     """
+
+    # depthai graph handles, populated in _prepare() / _pipeline_basis() and the subclass hooks.
+    # left_out / right_out are the (rectified) camera outputs; _out_left / _out_right are the
+    # terminal outputs the base _create_queues() reads (set by the subclass in _link_pipeline()).
+    pipeline: dai.Pipeline
+    left: Any
+    right: Any
+    left_out: Any
+    right_out: Any
+    _out_left: Any
+    _out_right: Any
 
     def __init__(
         self,
@@ -38,7 +46,7 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         force_usb2: bool,
         resize: Tuple[int, int],
         rectify: bool,
-        exposure_params: Tuple[int, int],
+        exposure_params: Optional[Tuple[int, int]],
         mx_id: str,
         isp_scale: Tuple[int, int] = (1, 1),
         encoder_quality: int = 80,
@@ -77,8 +85,8 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         Sets up :
         - camera configuration
         - device connection
-        - pipeline
-        - queues
+        - pipeline (nodes added to a v3 pipeline that owns the device)
+        - output queues
 
         If requested, pre-computes the undistort maps for the rectification.
 
@@ -112,20 +120,25 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         if self.cam_config.rectify:
             self._set_undistort_maps()
 
-        self.pipeline = self._create_pipeline()
-        self.pipeline.setXLinkChunkSize(0)  # better usb performance
+        # depthai v3: the pipeline is constructed around the already-opened device, and the subclass
+        # populates it with nodes in _create_pipeline().
+        self.pipeline = dai.Pipeline(self._device)
+        self._create_pipeline()
+
+        # Output queues are created from node outputs and must exist before the pipeline is started.
+        self.queues = self._create_queues()
 
         try:
-            self._device.startPipeline(self.pipeline)
-        except RuntimeError as e:
+            self.pipeline.start()
+        except Exception as e:
             if self.cam_config.tof_enabled:
                 raise RuntimeError(
                     "Could not start the depthai pipeline with the ToF enabled. This may be an RVC2 resource "
-                    "exhaustion (the ToF decoding shares SHAVEs with the video encoders). Try lowering tof_fps, "
-                    "or remove 'tof': true from the camera config json to disable the ToF."
+                    "exhaustion (the ToF decoding and host-run filters share resources with the video encoders). "
+                    "Try lowering tof_config.fps, disabling tof_filtering, or removing 'tof': true from the camera "
+                    "config json to disable the ToF."
                 ) from e
             raise
-        self.queues = self._create_queues()
 
         self.print_info()
 
@@ -166,44 +179,42 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         exit()
 
     def _pipeline_basis(self) -> dai.Pipeline:
-        """Creates and configures the left and right cameras and the image manip nodes.
+        """Creates and configures the left and right cameras (and, if rectifying, their warp nodes).
 
+        Sets self.left / self.right (the Camera nodes) and self.left_out / self.right_out (the
+        Node.Output to consume for each side, already rectified when rectify is enabled).
         This method is used (and/or extended) by the subclasses to create the basis pipeline.
         """
 
         self._logger.debug("Configuring depthai pipeline")
-        pipeline = dai.Pipeline()
+        pipeline = self.pipeline
 
         left_socket = get_socket_from_name("left", self.cam_config.name_to_socket)
         right_socket = get_socket_from_name("right", self.cam_config.name_to_socket)
 
-        self.left = pipeline.createColorCamera()
-        self.left.setFps(self.cam_config.fps)
-        self.left.setBoardSocket(left_socket)
-        self.left.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1440X1080)
-        self.left.setIspScale(*self.cam_config.isp_scale)
+        self.left = pipeline.create(dai.node.Camera).build(left_socket)
+        self.right = pipeline.create(dai.node.Camera).build(right_socket)
 
-        self.right = pipeline.createColorCamera()
-        self.right.setFps(self.cam_config.fps)
-        self.right.setBoardSocket(right_socket)
-        self.right.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1440X1080)
-        self.right.setIspScale(*self.cam_config.isp_scale)
+        for cam in (self.left, self.right):
+            if self.cam_config.exposure_params is not None:
+                cam.initialControl.setManualExposure(*self.cam_config.exposure_params)
+            if self.cam_config.inverted:
+                cam.setImageOrientation(dai.CameraImageOrientation.ROTATE_180_DEG)
 
-        # self.cam_config.set_undistort_resolution(self.left.getIspSize())
+        # v3 Camera.requestOutput folds the old ColorCamera ISP-scale + ImageManip resize into one
+        # call: it delivers an NV12 frame already scaled to the undistort resolution.
+        width, height = self.cam_config.undistort_resolution
+        fps = float(self.cam_config.fps)
+        left_out = self.left.requestOutput((width, height), dai.ImgFrame.Type.NV12, fps=fps)
+        right_out = self.right.requestOutput((width, height), dai.ImgFrame.Type.NV12, fps=fps)
 
-        if self.cam_config.exposure_params is not None:
-            self.left.initialControl.setManualExposure(*self.cam_config.exposure_params)
-            self.right.initialControl.setManualExposure(*self.cam_config.exposure_params)
-        if self.cam_config.inverted:
-            self.left.setImageOrientation(dai.CameraImageOrientation.ROTATE_180_DEG)
-            self.right.setImageOrientation(dai.CameraImageOrientation.ROTATE_180_DEG)
-
-        self.left_manip = self._create_imageManip(
-            pipeline, "left", self.cam_config.undistort_resolution, self.cam_config.rectify
-        )
-        self.right_manip = self._create_imageManip(
-            pipeline, "right", self.cam_config.undistort_resolution, self.cam_config.rectify
-        )
+        if self.cam_config.rectify:
+            # Rectification warp mesh moved from ImageManip.setWarpMesh (v2) to the dedicated Warp node.
+            self.left_out = self._create_warp("left", left_out, (width, height))
+            self.right_out = self._create_warp("right", right_out, (width, height))
+        else:
+            self.left_out = left_out
+            self.right_out = right_out
 
         return pipeline
 
@@ -216,53 +227,34 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         self._logger.error("Abstract class DepthaiWrapper does not implement link_pipeline()")
         exit()
 
-    def _create_output_streams(self, pipeline: dai.Pipeline) -> dai.Pipeline:
-        """Creates and names the output streams.
+    def _create_queues(self) -> Dict[str, dai.MessageQueue]:
+        """Creates the output queues from the terminal left/right outputs set by the subclass.
         This method is used (and/or extended) by the subclasses.
         """
-
-        self.xout_left = pipeline.createXLinkOut()
-        self.xout_left.setStreamName("left")
-
-        self.xout_right = pipeline.createXLinkOut()
-        self.xout_right.setStreamName("right")
-
-        return pipeline
-
-    def _create_queues(self) -> Dict[str, dai.DataOutputQueue]:
-        """Creates the output queues.
-        This method is used (and/or extended) by the subclasses.
-        """
-        queues: Dict[str, dai.DataOutputQueue] = {}
-        for name in ["left", "right"]:
-            queues[name] = self._device.getOutputQueue(name, maxSize=1, blocking=False)
+        queues: Dict[str, dai.MessageQueue] = {}
+        queues["left"] = self._out_left.createOutputQueue(maxSize=1, blocking=False)
+        queues["right"] = self._out_right.createOutputQueue(maxSize=1, blocking=False)
         return queues
 
-    def _create_imageManip(
+    def _create_warp(
         self,
-        pipeline: dai.Pipeline,
         cam_name: str,
+        src_out: dai.Node.Output,
         resolution: Tuple[int, int],
-        rectify: bool = True,
-    ) -> dai.node.ImageManip:
-        """Resize and optionally rectify an image"""
+    ) -> dai.Node.Output:
+        """Rectifies src_out with the precomputed warp mesh (replaces the v2 ImageManip warp path)."""
 
-        manip = pipeline.createImageManip()
-
-        if rectify:
-            try:
-                mesh, meshWidth, meshHeight = get_mesh(self.cam_config, cam_name)
-                manip.setWarpMesh(mesh, meshWidth, meshHeight)
-            except Exception as e:
-                self._logger.error(e)
-                exit()
-        manip.setMaxOutputFrameSize(resolution[0] * resolution[1] * 3)
-
-        manip.initialConfig.setKeepAspectRatio(True)
-        manip.initialConfig.setResize(resolution[0], resolution[1])
-        manip.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
-
-        return manip
+        warp = self.pipeline.create(dai.node.Warp)
+        try:
+            mesh, mesh_width, mesh_height = get_mesh(self.cam_config, cam_name)
+            warp.setWarpMesh(mesh, mesh_width, mesh_height)
+        except Exception as e:
+            self._logger.error(e)
+            exit()
+        warp.setOutputSize(resolution[0], resolution[1])
+        warp.setMaxOutputFrameSize(resolution[0] * resolution[1] * 3)
+        src_out.link(warp.inputImage)
+        return warp.out
 
     def _set_undistort_maps(self) -> None:
         """Computes and assign the undistort maps for the rectification."""
@@ -310,7 +302,7 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         right_to_left = camera_poses["right_to_left"]
         R_right_to_left = np.array(right_to_left["R"])
         T_right_to_left = np.array(right_to_left["T"])
-        T_right_to_left *= 100  # Needs to be in centimeters (?) # TODO test
+        T_right_to_left *= 100  # Needs to be in centimeters (?) # TODO test
 
         R_left_to_right, T_left_to_right = get_inv_R_T(R_right_to_left, T_right_to_left)
 
@@ -344,10 +336,7 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
 
 if __name__ == "__main__":
     from pollen_vision.camera_wrappers.depthai import SDKWrapper
-    from pollen_vision.camera_wrappers.depthai.utils import (
-        get_config_file_path,
-        get_connected_devices,
-    )
+    from pollen_vision.camera_wrappers.depthai.utils import get_config_file_path, get_connected_devices
 
     devices = get_connected_devices()
     print(f"Detected cameras: {devices}")

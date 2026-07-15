@@ -1,5 +1,5 @@
 from datetime import timedelta
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import depthai as dai
 import numpy as np
@@ -10,6 +10,9 @@ from pollen_vision.camera_wrappers.depthai.wrapper import DepthaiWrapper
 
 # Depth is left aligned by convention
 # TODO do we need to give the option to change this?
+# NOTE: migrated to the depthai v3 API alongside the teleop path. The stereo-depth branch
+# (compute_depth=True) has NOT been validated on a device yet — it is not used by the Reachy teleop
+# head. Validate on an SR / depth-capable camera before relying on it.
 class SDKWrapper(DepthaiWrapper):  # type: ignore[misc]
     """A wrapper for the depthai library that exposes only the relevant features for Pollen's reachy sdk.
 
@@ -30,6 +33,12 @@ class SDKWrapper(DepthaiWrapper):  # type: ignore[misc]
         - mx_id: the id of the camera
         - jpeg_output: encode the left and right images in mjpeg
     """
+
+    # depthai nodes populated in _create_encoders() / _create_pipeline().
+    left_encoder: Any
+    right_encoder: Any
+    depth: Any
+    depth_max_disparity: Any
 
     def __init__(
         self,
@@ -79,69 +88,40 @@ class SDKWrapper(DepthaiWrapper):  # type: ignore[misc]
     def get_depth_K(self) -> npt.NDArray[np.float32]:
         return super().get_K(left=True)  # type: ignore
 
-    def _create_queues(self) -> Dict[str, dai.DataOutputQueue]:
+    def _create_queues(self) -> Dict[str, dai.MessageQueue]:
         """Extends the base class method _create_queues() to add the depth and disparity queues
         as well as the rectified left and right images queues from depthai's depth node.
         """
 
-        queues: Dict[str, dai.DataOutputQueue] = super()._create_queues()
+        queues: Dict[str, dai.MessageQueue] = super()._create_queues()
         if self._compute_depth:
-            queues["depth"] = self._device.getOutputQueue("depth", maxSize=1, blocking=False)
-            queues["disparity"] = self._device.getOutputQueue("disparity", maxSize=1, blocking=False)
+            queues["depth"] = self.depth.depth.createOutputQueue(maxSize=1, blocking=False)
+            queues["disparity"] = self.depth.disparity.createOutputQueue(maxSize=1, blocking=False)
 
-            queues["depthNode_left"] = self._device.getOutputQueue("depthNode_left", maxSize=1, blocking=False)
-            queues["depthNode_right"] = self._device.getOutputQueue("depthNode_right", maxSize=1, blocking=False)
+            queues["depthNode_left"] = self.depth.rectifiedLeft.createOutputQueue(maxSize=1, blocking=False)
+            queues["depthNode_right"] = self.depth.rectifiedRight.createOutputQueue(maxSize=1, blocking=False)
 
         return queues
 
-    def _create_output_streams(self, pipeline: dai.Pipeline) -> dai.Pipeline:
-        """Extends the base class method _create_output_streams() to add the depth and disparity streams
-        as well as the rectified left and right images streams from depthai's depth node.
+    def _link_pipeline(self, pipeline: dai.Pipeline) -> dai.Pipeline:
+        """Overloads the base class abstract method _link_pipeline() to link the nodes together.
+
+        Sets self._out_left / self._out_right (consumed by the base _create_queues) to either the
+        mjpeg-encoded bitstream or the raw camera/warp output.
         """
 
-        pipeline = super()._create_output_streams(pipeline)
-
-        if self._compute_depth:
-            self.xout_depth = pipeline.createXLinkOut()
-            self.xout_depth.setStreamName("depth")
-
-            self.xout_disparity = pipeline.createXLinkOut()
-            self.xout_disparity.setStreamName("disparity")
-
-            self.xout_depthNode_left = pipeline.createXLinkOut()
-            self.xout_depthNode_left.setStreamName("depthNode_left")
-
-            self.xout_depthNode_right = pipeline.createXLinkOut()
-            self.xout_depthNode_right.setStreamName("depthNode_right")
-
-        return pipeline
-
-    def _link_pipeline(self, pipeline: dai.Pipeline) -> dai.Pipeline:
-        """Overloads the base class abstract method _link_pipeline() to link the nodes together."""
-
-        # Resize, optionally rectify
-        self.left.isp.link(self.left_manip.inputImage)
-        self.right.isp.link(self.right_manip.inputImage)
-
         if self._mjpeg:
-            self.left_manip.out.link(self.left_encoder.input)
-            self.right_manip.out.link(self.right_encoder.input)
-
-            self.left_encoder.bitstream.link(self.xout_left.input)
-            self.right_encoder.bitstream.link(self.xout_right.input)
+            self.left_out.link(self.left_encoder.input)
+            self.right_out.link(self.right_encoder.input)
+            self._out_left = self.left_encoder.bitstream
+            self._out_right = self.right_encoder.bitstream
         else:
-            self.left_manip.out.link(self.xout_left.input)
-            self.right_manip.out.link(self.xout_right.input)
+            self._out_left = self.left_out
+            self._out_right = self.right_out
 
         if self._compute_depth:
-            self.left_manip.out.link(self.depth.left)
-            self.right_manip.out.link(self.depth.right)
-
-            self.depth.depth.link(self.xout_depth.input)
-            self.depth.disparity.link(self.xout_disparity.input)
-
-            self.depth.rectifiedLeft.link(self.xout_depthNode_left.input)
-            self.depth.rectifiedRight.link(self.xout_depthNode_right.input)
+            self.left_out.link(self.depth.left)
+            self.right_out.link(self.depth.right)
 
         return pipeline
 
@@ -175,32 +155,27 @@ class SDKWrapper(DepthaiWrapper):  # type: ignore[misc]
         self.right.initialControl.setChromaDenoise(0)
 
         if self._compute_depth:
-            # Configuring depth node
+            # Configuring depth node (depthai v3: StereoDepthConfig is mutated in place, there is no
+            # initialConfig.get()/set(), and the v2 HIGH_DENSITY preset is DENSITY in v3).
             left_socket = get_socket_from_name("left", self.cam_config.name_to_socket)
-            self.depth = pipeline.createStereoDepth()
-            self.depth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+            self.depth = pipeline.create(dai.node.StereoDepth)
+            self.depth.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DENSITY)
             self.depth.setLeftRightCheck(True)
             self.depth.setExtendedDisparity(False)
             self.depth.setSubpixel(True)
             self.depth.setDepthAlign(left_socket)
             self.depth.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
-            self.depth_max_disparity = self.depth.getMaxDisparity()
+            self.depth_max_disparity = self.depth.initialConfig.getMaxDisparity()
 
-            config = self.depth.initialConfig.get()
-            config.postProcessing.speckleFilter.enable = False
-            config.postProcessing.speckleFilter.speckleRange = 50
-            config.postProcessing.temporalFilter.enable = False
-            config.postProcessing.spatialFilter.enable = False
-            config.postProcessing.spatialFilter.holeFillingRadius = 2
-            config.postProcessing.spatialFilter.numIterations = 1
-            # config.postProcessing.thresholdFilter.minRange = 400
-            # config.postProcessing.thresholdFilter.maxRange = 15000
-            # config.postProcessing.decimationFilter.decimationFactor = 1
-            self.depth.initialConfig.set(config)
+            post = self.depth.initialConfig.postProcessing
+            post.speckleFilter.enable = False
+            post.speckleFilter.speckleRange = 50
+            post.temporalFilter.enable = False
+            post.spatialFilter.enable = False
+            post.spatialFilter.holeFillingRadius = 2
+            post.spatialFilter.numIterations = 1
 
         if self._mjpeg:
             pipeline = self._create_encoders(pipeline)
-
-        pipeline = self._create_output_streams(pipeline)
 
         return self._link_pipeline(pipeline)

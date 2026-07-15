@@ -1,17 +1,58 @@
 """Camera configuration class for depthai cameras."""
 
+import copy
 import json
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import depthai as dai
 import numpy as np
 import numpy.typing as npt
-from pollen_vision.camera_wrappers.depthai.utils import (
-    get_socket_from_name,
-    socket_stringToCam,
-)
+from pollen_vision.camera_wrappers.depthai.utils import get_socket_from_name, socket_stringToCam
+
+# All ToF *decoding* settings (applied to the depthai v3 ToF node's ToFConfig). Every key here is
+# overridable from the "tof_config" block of the camera config json. "median" is a string naming a
+# dai.filters.params.MedianFilter member (see utils.median_stringToParam).
+TOF_CONFIG_DEFAULTS: Dict[str, Any] = {
+    "fps": 30,
+    "enable_fppn_correction": True,
+    "enable_optical_correction": True,
+    "enable_wiggle_correction": True,
+    "enable_temperature_correction": False,
+    "enable_phase_unwrapping": True,
+    "enable_phase_shuffle_temporal_filter": True,
+    "enable_burst_mode": False,
+    "enable_distortion_correction": True,
+    "phase_unwrapping_level": 4,
+    "phase_unwrap_error_threshold": 300,
+    "median": "KERNEL_3x3",
+}
+
+# Post-decode depth filtering (depthai v3 ToFDepthConfidenceFilter + ImageFilters nodes). Overridable
+# from the "tof_filtering" block of the camera config json. On RVC2 these run on the host CPU
+# (run_on_host), so enabling them costs host cycles rather than device SHAVEs. The image filters are
+# applied in the order confidence -> temporal -> speckle -> spatial -> median (Luxonis tuning guide).
+TOF_FILTERING_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,
+    "run_on_host": True,
+    "confidence": {"enable": False, "threshold": 0},
+    "temporal": {"enable": False, "alpha": 0.4, "delta": 3, "persistency_mode": "VALID_2_IN_LAST_4"},
+    "speckle": {"enable": False, "difference_threshold": 2, "speckle_range": 50},
+    "spatial": {"enable": False, "alpha": 0.5, "delta": 3, "hole_filling_radius": 2, "num_iterations": 1},
+    "median": "MEDIAN_OFF",
+}
+
+
+def _merge_defaults(defaults: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-merges a (possibly partial) override dict onto a copy of defaults (one level of nesting)."""
+    merged = copy.deepcopy(defaults)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class CamConfig:
@@ -35,7 +76,7 @@ class CamConfig:
         cam_config_json: str,
         fps: int,
         resize: Tuple[int, int],
-        exposure_params: Tuple[int, int],
+        exposure_params: Optional[Tuple[int, int]],
         mx_id: str = "",
         isp_scale: Tuple[int, int] = (1, 1),
         rectify: bool = False,
@@ -67,11 +108,10 @@ class CamConfig:
         # contains the identical left/right pair. Its socket is not configured but discovered
         # at runtime (the only sensor reporting CameraSensorType.TOF in supportedTypes).
         self.tof_enabled: bool = bool(config.get("tof", False))
-        # EEPROM-based ToF corrections (FPPN, wiggle, optical). Disable ("tof_corrections": false)
-        # to get uncorrected depth out of a module whose calibration EEPROM cannot be read.
-        self.tof_corrections: bool = bool(config.get("tof_corrections", True))
+        self.tof_config: Dict[str, Any] = self._parse_tof_config(config, tof_fps)
+        self.tof_filtering: Dict[str, Any] = _merge_defaults(TOF_FILTERING_DEFAULTS, config.get("tof_filtering", {}))
         self.tof_socket: Optional[str] = None
-        self.tof_fps = tof_fps
+        self.tof_fps = int(self.tof_config["fps"])
         self.tof_resolution: Tuple[int, int] = (640, 480)
         self.name_to_socket = {v: k for k, v in self.socket_to_name.items()}
         self.sensor_resolution = (0, 0)
@@ -86,6 +126,24 @@ class CamConfig:
         # lazy init, camera needs to be connected to
         self.P_left: Optional[cv2.UMat] = None
         self.P_right: Optional[cv2.UMat] = None
+
+    def _parse_tof_config(self, config: Dict[str, Any], default_fps: int) -> Dict[str, Any]:
+        """Builds the ToF decoding config, layering three sources (lowest to highest precedence):
+        TOF_CONFIG_DEFAULTS, the legacy "tof_corrections" bool (kept for backward compatibility), the
+        constructor tof_fps, then the explicit "tof_config" block from the camera config json.
+        """
+        defaults = copy.deepcopy(TOF_CONFIG_DEFAULTS)
+        defaults["fps"] = default_fps
+
+        # Legacy shorthand: "tof_corrections": false used to turn off FPPN/wiggle/optical together
+        # (fallback for modules whose calibration EEPROM could not be read).
+        if "tof_corrections" in config:
+            corrections = bool(config["tof_corrections"])
+            defaults["enable_fppn_correction"] = corrections
+            defaults["enable_wiggle_correction"] = corrections
+            defaults["enable_optical_correction"] = corrections
+
+        return _merge_defaults(defaults, config.get("tof_config", {}))
 
     def get_device_info(self) -> dai.DeviceInfo:
         """Returns a dai.DeviceInfo object with the mx_id.
@@ -214,7 +272,11 @@ class CamConfig:
         ret_string += "force_usb2: {}\n".format(self.force_usb2)
         exp = "auto" if self.exposure_params is None else str(self.exposure_params)
         ret_string += "Exposure params: {}\n".format(exp)
-        tof = "{} @ {} fps".format(self.tof_socket or "socket not discovered yet", self.tof_fps) if self.tof_enabled else "none"
+        if self.tof_enabled:
+            filt = "filtering on" if self.tof_filtering.get("enabled") else "filtering off"
+            tof = "{} @ {} fps, {}".format(self.tof_socket or "socket not discovered yet", self.tof_fps, filt)
+        else:
+            tof = "none"
         ret_string += "ToF: {}\n".format(tof)
         ret_string += "Undistort maps are: " + "set" if self.undistort_maps["left"] is not None else "not set"
 

@@ -1,1 +1,30 @@
-{"socket_to_name": {"CAM_B": "right", "CAM_C": "left"}, "inverted": false, "fisheye": true, "mono": false, "tof": true}
+{
+  "socket_to_name": {"CAM_B": "right", "CAM_C": "left"},
+  "inverted": false,
+  "fisheye": true,
+  "mono": false,
+  "tof": true,
+  "tof_config": {
+    "fps": 30,
+    "enable_fppn_correction": true,
+    "enable_optical_correction": true,
+    "enable_wiggle_correction": true,
+    "enable_temperature_correction": false,
+    "enable_phase_unwrapping": true,
+    "enable_phase_shuffle_temporal_filter": true,
+    "enable_burst_mode": false,
+    "enable_distortion_correction": true,
+    "phase_unwrapping_level": 4,
+    "phase_unwrap_error_threshold": 300,
+    "median": "KERNEL_3x3"
+  },
+  "tof_filtering": {
+    "enabled": true,
+    "run_on_host": true,
+    "confidence": {"enable": false, "threshold": 0},
+    "temporal": {"enable": true, "alpha": 0.4, "delta": 3, "persistency_mode": "VALID_2_IN_LAST_4"},
+    "speckle": {"enable": true, "difference_threshold": 2, "speckle_range": 50},
+    "spatial": {"enable": true, "alpha": 0.5, "delta": 3, "hole_filling_radius": 2, "num_iterations": 1},
+    "median": "KERNEL_5x5"
+  }
+}
