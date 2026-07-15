@@ -100,9 +100,14 @@ class CamConfig:
 
         config = json.load(open(self._cam_config_json, "rb"))
         self.socket_to_name = config["socket_to_name"]
-        self.inverted = config["inverted"]
-        self.fisheye = config["fisheye"]
-        self.mono = config["mono"]
+        self.inverted = bool(config.get("inverted", False))
+        self.fisheye = bool(config.get("fisheye", False))
+        self.mono = bool(config.get("mono", False))
+        # Config kill switch: "rectify": false forces rectification off regardless of the CLI/constructor.
+        # This drops the Warp + NV12-conversion ImageManip nodes from the pipeline (a big cut in
+        # RVC2 warp-engine load), so it doubles as a fallback when the full pipeline over-subscribes
+        # the device. "fisheye": false selects the plumb_bob (non-fisheye) undistortion model.
+        self.rectify = bool(rectify) and bool(config.get("rectify", True))
         # The ToF module lives on its own socket, deliberately kept out of socket_to_name:
         # the stereo code paths (wrapper._prepare(), flash(), ...) assume socket_to_name only
         # contains the identical left/right pair. Its socket is not configured but discovered

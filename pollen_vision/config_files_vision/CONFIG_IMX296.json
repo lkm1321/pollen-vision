@@ -2,6 +2,7 @@
   "socket_to_name": {"CAM_B": "right", "CAM_C": "left"},
   "inverted": false,
   "fisheye": true,
+  "rectify": true,
   "mono": false,
   "tof": true,
   "tof_config": {
