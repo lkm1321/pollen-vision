@@ -231,7 +231,13 @@ class CamConfig:
         the left/right sockets), approximate intrinsics are synthesized from the module's datasheet
         FoV (90 deg horizontal, 65 deg vertical).
         """
-        assert self.tof_socket is not None, "get_tof_camera_info() called before the ToF socket was discovered"
+        # Not an assert: the service runs under PYTHONOPTIMIZE=1, which strips asserts, so a None socket
+        # would fall through to socket_stringToCam[None] -> KeyError. Fail with a clear message instead.
+        if self.tof_socket is None:
+            raise RuntimeError(
+                "get_tof_camera_info() called but the ToF socket was never discovered. The ToF pipeline "
+                "was not built -- set 'tof': true in the camera config json (or drop --tof)."
+            )
 
         width, height = self.tof_resolution
         tof_socket = socket_stringToCam[self.tof_socket]

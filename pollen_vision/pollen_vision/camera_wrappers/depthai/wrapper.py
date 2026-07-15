@@ -13,7 +13,7 @@ import depthai as dai
 import numpy as np
 import numpy.typing as npt
 from pollen_vision.camera_wrappers import CameraWrapper
-from pollen_vision.camera_wrappers.depthai.calibration.undistort import compute_undistort_maps, get_mesh
+from pollen_vision.camera_wrappers.depthai.calibration.undistort import compute_undistort_maps
 from pollen_vision.camera_wrappers.depthai.cam_config import CamConfig
 from pollen_vision.camera_wrappers.depthai.utils import get_inv_R_T, get_socket_from_name, socket_camToString
 
@@ -205,19 +205,25 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
                 cam.setImageOrientation(dai.CameraImageOrientation.ROTATE_180_DEG)
 
         # v3 Camera.requestOutput folds the old ColorCamera ISP-scale + ImageManip resize into one
-        # call, delivering a frame already scaled to the undistort resolution.
+        # call, delivering an NV12 frame already scaled to the undistort resolution.
         width, height = self.cam_config.undistort_resolution
         fps = float(self.cam_config.fps)
 
         if self.cam_config.rectify:
-            # The Warp node does not accept NV12 (its supported inputs are RAW8/GRAY8/RAW16/RGB-BGR
-            # planar/YUV420p), so request YUV420p, warp it, then convert to NV12 for the encoders
-            # inside _create_warp() -- the v2 ImageManip warp did the warp and the NV12 conversion
-            # in a single node.
-            left_src = self.left.requestOutput((width, height), dai.ImgFrame.Type.YUV420p, fps=fps)
-            right_src = self.right.requestOutput((width, height), dai.ImgFrame.Type.YUV420p, fps=fps)
-            self.left_out = self._create_warp("left", left_src, (width, height))
-            self.right_out = self._create_warp("right", right_src, (width, height))
+            # Undistort in the camera/ISP path (the v3-recommended approach) instead of a separate
+            # Warp + NV12-conversion ImageManip. On RVC2 the Warp node uses the SAME hardware block as
+            # ImageManip, so a Warp + a conversion ImageManip per camera was 4 concurrent ops on that
+            # block vs the 2 the v2 pipeline used -- that over-subscription crashed the device.
+            # enableUndistortion applies the device's flashed calibration and outputs NV12 directly,
+            # adding no extra warp-block nodes. NOTE: this is lens undistortion from the calibration,
+            # not the custom cv2.stereoRectify mesh (get_mesh) -- the epipolar stereo-rotation is not
+            # applied here; see _set_undistort_maps()/compute_projection_matrices() for the ROS side.
+            self.left_out = self.left.requestOutput(
+                (width, height), dai.ImgFrame.Type.NV12, dai.ImgResizeMode.CROP, fps, enableUndistortion=True
+            )
+            self.right_out = self.right.requestOutput(
+                (width, height), dai.ImgFrame.Type.NV12, dai.ImgResizeMode.CROP, fps, enableUndistortion=True
+            )
         else:
             self.left_out = self.left.requestOutput((width, height), dai.ImgFrame.Type.NV12, fps=fps)
             self.right_out = self.right.requestOutput((width, height), dai.ImgFrame.Type.NV12, fps=fps)
@@ -241,35 +247,6 @@ class DepthaiWrapper(CameraWrapper):  # type: ignore
         queues["left"] = self._out_left.createOutputQueue(maxSize=1, blocking=False)
         queues["right"] = self._out_right.createOutputQueue(maxSize=1, blocking=False)
         return queues
-
-    def _create_warp(
-        self,
-        cam_name: str,
-        src_out: dai.Node.Output,
-        resolution: Tuple[int, int],
-    ) -> dai.Node.Output:
-        """Rectifies src_out (a YUV420p output) with the precomputed warp mesh and converts the
-        warped frame to NV12 for the video encoders (replaces the v2 ImageManip warp path, which did
-        both the mesh warp and the NV12 conversion in a single node)."""
-
-        warp = self.pipeline.create(dai.node.Warp)
-        try:
-            mesh, mesh_width, mesh_height = get_mesh(self.cam_config, cam_name)
-            warp.setWarpMesh(mesh, mesh_width, mesh_height)
-        except Exception as e:
-            self._logger.error(e)
-            exit()
-        warp.setOutputSize(resolution[0], resolution[1])
-        warp.setMaxOutputFrameSize(resolution[0] * resolution[1] * 3)
-        src_out.link(warp.inputImage)
-
-        # Warp preserves the input frame type (YUV420p); the encoders need NV12, so convert here.
-        to_nv12 = self.pipeline.create(dai.node.ImageManip)
-        to_nv12.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
-        to_nv12.initialConfig.setOutputSize(resolution[0], resolution[1], dai.ImageManipConfig.ResizeMode.NONE)
-        to_nv12.setMaxOutputFrameSize(resolution[0] * resolution[1] * 3)
-        warp.out.link(to_nv12.inputImage)
-        return to_nv12.out
 
     def _set_undistort_maps(self) -> None:
         """Computes and assign the undistort maps for the rectification."""
